@@ -1,164 +1,85 @@
-version: "3.9"
-
-# ============================================================
-# Portable AI Server — runs identically on Azure, Oracle Cloud,
-# Hostinger, or any Ubuntu 24.04 VPS with Docker installed.
-# All state lives in named Docker volumes (see `volumes:` below).
-# ============================================================
-
 services:
-
-  # ----------------------------------------------------------
-  # Ollama — local LLM inference server
-  # ----------------------------------------------------------
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - ai_internal
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-    # Uncomment on a GPU host (requires nvidia-container-toolkit):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-
-  # ----------------------------------------------------------
-  # Hermes Agent — the application layer
-  # ----------------------------------------------------------
-  hermes:
-    build:
-      context: ./hermes
-      dockerfile: Dockerfile
-    image: hermes-agent:local
-    container_name: hermes
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      OLLAMA_BASE_URL: http://ollama:11434
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      QDRANT_URL: http://qdrant:6333
-    depends_on:
-      ollama:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
-    volumes:
-      - hermes_data:/app/data
-    networks:
-      - ai_internal
-    labels:
-      # Locally built image — Watchtower must not try to pull it
-      - "com.centurylinklabs.watchtower.enable=false"
-
-  # ----------------------------------------------------------
-  # PostgreSQL — relational storage
-  # ----------------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
-    networks:
-      - ai_internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
 
-  # ----------------------------------------------------------
-  # Qdrant — vector database
-  # ----------------------------------------------------------
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: qdrant
     restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    ports:
+      - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
-      - ./qdrant/config.yaml:/qdrant/config/production.yaml:ro
-    networks:
-      - ai_internal
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-
-  # ----------------------------------------------------------
-  # Nginx — single public entrypoint / reverse proxy
-  # ----------------------------------------------------------
-  nginx:
-    image: nginx:stable-alpine
-    container_name: nginx
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - nginx_certs:/etc/nginx/certs
-    depends_on:
-      - hermes
-    networks:
-      - ai_internal
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/healthz"]
-      interval: 30s
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
       timeout: 5s
-      retries: 3
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+      retries: 10
 
-  # ----------------------------------------------------------
-  # Watchtower — automatic container image updates
-  # ----------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    env_file:
+      - .env
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "64000"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    command: gateway run
+    env_file:
+      - .env
+    environment:
+      DISCORD_COMMAND_SYNC_POLICY: "bulk"
+      DISCORD_REQUIRE_MENTION: "true"
+      DISCORD_IGNORE_NO_MENTION: "true"
+      DISCORD_ALLOW_BOTS: "none"
+      DISCORD_AUTO_THREAD: "true"
+      DISCORD_REACTIONS: "true"
+    volumes:
+      - hermes_data:/opt/data
+      - ./hermes/config.yaml:/opt/data/config.yaml
+    depends_on:
+      ollama:
+        condition: service_healthy
+
   watchtower:
     image: containrrr/watchtower:latest
-    container_name: watchtower
     restart: unless-stopped
+    command: --label-enable --cleanup --interval ${WATCHTOWER_POLL_INTERVAL:-86400}
+    environment:
+      DOCKER_API_VERSION: "1.40"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_LABEL_ENABLE: "true"
-      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-86400}
-    networks:
-      - ai_internal
 
-# ------------------------------------------------------------
-# Persistent data — named volumes only, so `docker volume` +
-# a tar backup is all that's needed to move providers.
-# ------------------------------------------------------------
 volumes:
-  ollama_data:
-  hermes_data:
   postgres_data:
   qdrant_data:
-  nginx_certs:
-
-networks:
-  ai_internal:
-    driver: bridge
+  ollama_data:
+  hermes_data:

@@ -1,0 +1,22 @@
+model:
+  provider: nvidia
+  default: nvidia/nemotron-3-ultra-550b-a55b
+  base_url: https://integrate.api.nvidia.com/v1
+  context_length: 65536
+
+fallback_providers:
+  - provider: custom
+    model: phi4-mini
+    base_url: http://ollama:11434/v1
+    api_key: local-ollama
+    context_length: 65536
+
+agent:
+  api_max_retries: 0
+
+group_sessions_per_user: true
+
+discord:
+  require_mention: true
+  auto_thread: true
+  reactions: true
