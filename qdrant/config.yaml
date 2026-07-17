@@ -1,0 +1,3 @@
+# Qdrant configuration placeholder.
+# Add deployment-specific settings here as the vector layer is configured.
+log_level: INFO
